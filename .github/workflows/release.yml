@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+      packages: write
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+        registry-url: 'https://registry.npmjs.org'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Run full test suite
+      run: |
+        npm run lint
+        npm run test:coverage
+        npm run build
+        
+    - name: Security audit
+      run: npm audit --audit-level=moderate
+      
+    - name: Extract version from tag
+      id: version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      
+    - name: Update package version
+      run: npm version ${{ steps.version.outputs.VERSION }} --no-git-tag-version
+      
+    - name: Generate changelog
+      id: changelog
+      run: |
+        if [ -f CHANGELOG.md ]; then
+          # Extract changelog section for this version
+          awk "/^## \[${{ steps.version.outputs.VERSION }}\]/{flag=1; next} /^## \[/{flag=0} flag" CHANGELOG.md > release_notes.md
+        else
+          echo "Release ${{ steps.version.outputs.VERSION }}" > release_notes.md
+          echo "" >> release_notes.md
+          echo "See commits for details." >> release_notes.md
+        fi
+        
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ github.ref }}
+        name: Release ${{ steps.version.outputs.VERSION }}
+        body_path: release_notes.md
+        draft: false
+        prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
+        
+    - name: Publish to npm
+      run: npm publish --access public
+      env:
+        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
