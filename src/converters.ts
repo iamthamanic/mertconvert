@@ -9,7 +9,8 @@ export async function convertImageToWebP(
   inputPath: string,
   outputPath: string,
   targetSizeKB: number,
-  initialQuality: number
+  initialQuality: number,
+  onWarning?: (message: string) => void
 ): Promise<boolean> {
   let quality = initialQuality;
   let attempts = 0;
@@ -29,17 +30,40 @@ export async function convertImageToWebP(
       }
 
       // Reduce quality for next attempt
-      quality = Math.max(0, quality - 10);
+      quality = Math.max(10, quality - 15); // Keep minimum quality at 10
       attempts++;
 
-      if (quality === 0) {
-        console.log(
-          chalk.yellow(
-            `  ⚠ Warning: Cannot achieve target size for ${path.basename(
-              inputPath
-            )}, saved at minimum quality`
-          )
-        );
+      // If we can't achieve target size, try more aggressive compression
+      if (attempts >= maxAttempts - 1) {
+        // Final attempt with very low quality
+        await sharp(inputPath)
+          .webp({ quality: 10, effort: 6 })
+          .toFile(outputPath);
+        
+        const finalStats = await fs.stat(outputPath);
+        const finalSizeKB = finalStats.size / 1024;
+        
+        if (finalSizeKB > targetSizeKB) {
+          // Still too large - try resizing the image
+          const metadata = await sharp(inputPath).metadata();
+          const reduction = Math.sqrt(targetSizeKB / finalSizeKB);
+          const newWidth = Math.floor((metadata.width || 1920) * reduction);
+          const newHeight = Math.floor((metadata.height || 1080) * reduction);
+          
+          await sharp(inputPath)
+            .resize(newWidth, newHeight)
+            .webp({ quality: 20, effort: 6 })
+            .toFile(outputPath);
+            
+          // Check final size after resize
+          const resizedStats = await fs.stat(outputPath);
+          const resizedSizeKB = resizedStats.size / 1024;
+          
+          if (resizedSizeKB > targetSizeKB && onWarning) {
+            onWarning(`Cannot achieve ${targetSizeKB}KB target for ${path.basename(inputPath)} (final: ${Math.round(resizedSizeKB)}KB)`);
+          }
+        }
+        
         return true;
       }
     } catch (error) {

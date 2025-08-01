@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
 import path from 'path';
+import { readFileSync } from 'fs';
 import chalk from 'chalk';
 import cliProgress from 'cli-progress';
 import fs from 'fs-extra';
 import prompts from 'prompts';
-import { readFileSync } from 'fs';
 import { convertImageToWebP, convertVideoToWebM } from './converters';
 import {
   validateMultiplePaths,
@@ -82,6 +82,9 @@ export async function convertMedia(options: ConversionOptions): Promise<Conversi
   console.log(chalk.blue(`\nConverting ${totalFiles} files...\n`));
   progressBar.start(totalFiles, 0);
 
+  // Collect warnings to show after progress bar
+  const warnings: string[] = [];
+
   // Convert images
   for (const imagePath of imageFiles) {
     let outputPath: string;
@@ -106,7 +109,8 @@ export async function convertMedia(options: ConversionOptions): Promise<Conversi
       imagePath,
       outputPath,
       options.maxSizeKB,
-      options.quality
+      options.quality,
+      (warning: string) => warnings.push(warning)
     );
 
     if (success) {
@@ -156,6 +160,12 @@ export async function convertMedia(options: ConversionOptions): Promise<Conversi
 
   progressBar.stop();
 
+  // Show any warnings after progress bar is complete
+  if (warnings.length > 0) {
+    console.log(chalk.yellow('\n⚠ Warnings:'));
+    warnings.forEach(warning => console.log(chalk.yellow(`  ${warning}`)));
+  }
+
   return result;
 }
 
@@ -163,7 +173,7 @@ export async function convertMedia(options: ConversionOptions): Promise<Conversi
 function getVersion(): string {
   try {
     const packagePath = path.join(__dirname, '..', 'package.json');
-    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8'));
+    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as { version: string };
     return packageJson.version;
   } catch {
     return 'unknown';
