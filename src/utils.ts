@@ -20,6 +20,21 @@ export const VIDEO_EXTENSIONS = [
   '.mpeg',
 ];
 
+// Parse multiple file paths from drag & drop input
+export function parseMultipleFiles(input: string): string[] {
+  // Handle escaped spaces in file paths by temporarily replacing them
+  const escapedSpaceMarker = '___ESCAPED_SPACE___';
+  const preprocessed = input.replace(/\\ /g, escapedSpaceMarker);
+  
+  // Split by spaces and restore escaped spaces
+  const paths = preprocessed
+    .split(' ')
+    .map(p => p.replace(new RegExp(escapedSpaceMarker, 'g'), ' '))
+    .filter(p => p.trim().length > 0);
+  
+  return paths;
+}
+
 // Validate and sanitize file paths
 export function validatePath(inputPath: string): string {
   // Remove quotes and trim
@@ -34,6 +49,79 @@ export function validatePath(inputPath: string): string {
   const absolutePath = path.resolve(cleanPath);
 
   return absolutePath;
+}
+
+// Validate multiple paths and return info about them
+export async function validateMultiplePaths(input: string): Promise<{
+  isMultipleFiles: boolean;
+  paths: string[];
+  allExist: boolean;
+  validPaths: string[];
+  invalidPaths: string[];
+}> {
+  const potentialPaths = parseMultipleFiles(input);
+  
+  // If only one path, treat as single path
+  if (potentialPaths.length <= 1) {
+    const singlePath = validatePath(input);
+    const exists = await fs.pathExists(singlePath);
+    return {
+      isMultipleFiles: false,
+      paths: [singlePath],
+      allExist: exists,
+      validPaths: exists ? [singlePath] : [],
+      invalidPaths: exists ? [] : [singlePath]
+    };
+  }
+  
+  // Multiple paths detected
+  const validPaths: string[] = [];
+  const invalidPaths: string[] = [];
+  
+  for (const pathStr of potentialPaths) {
+    try {
+      const cleanPath = validatePath(pathStr);
+      const exists = await fs.pathExists(cleanPath);
+      
+      if (exists) {
+        validPaths.push(cleanPath);
+      } else {
+        invalidPaths.push(cleanPath);
+      }
+    } catch (error) {
+      invalidPaths.push(pathStr);
+    }
+  }
+  
+  return {
+    isMultipleFiles: true,
+    paths: [...validPaths, ...invalidPaths],
+    allExist: invalidPaths.length === 0,
+    validPaths,
+    invalidPaths
+  };
+}
+
+// Get files from multiple individual file paths
+export async function getFilesFromMultiplePaths(paths: string[], extensions: string[]): Promise<string[]> {
+  const allFiles: string[] = [];
+  
+  for (const filePath of paths) {
+    const stats = await fs.stat(filePath);
+    
+    if (stats.isFile()) {
+      const ext = path.extname(filePath).toLowerCase();
+      if (extensions.includes(ext)) {
+        allFiles.push(filePath);
+      }
+    } else if (stats.isDirectory()) {
+      // If it's a directory, get files recursively
+      const dirFiles = await getMediaFiles(filePath, extensions);
+      allFiles.push(...dirFiles);
+    }
+  }
+  
+  return allFiles;
 }
 
 // Check if ffmpeg is installed

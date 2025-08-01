@@ -5,11 +5,13 @@ import chalk from 'chalk';
 import cliProgress from 'cli-progress';
 import fs from 'fs-extra';
 import prompts from 'prompts';
+import { readFileSync } from 'fs';
 import { convertImageToWebP, convertVideoToWebM } from './converters';
 import {
-  validatePath,
+  validateMultiplePaths,
   checkFFmpeg,
   getMediaFiles,
+  getFilesFromMultiplePaths,
   IMAGE_EXTENSIONS,
   VIDEO_EXTENSIONS,
 } from './utils';
@@ -17,6 +19,8 @@ import {
 interface ConversionOptions {
   mediaType: 'images' | 'videos' | 'both';
   inputPath: string;
+  inputPaths?: string[]; // For multiple files
+  isMultipleFiles?: boolean;
   maxSizeKB: number;
   quality: number;
   outputDir: string;
@@ -39,10 +43,26 @@ export async function convertMedia(options: ConversionOptions): Promise<Conversi
   };
 
   // Get all files to convert
-  const imageFiles =
-    options.mediaType !== 'videos' ? await getMediaFiles(options.inputPath, IMAGE_EXTENSIONS) : [];
-  const videoFiles =
-    options.mediaType !== 'images' ? await getMediaFiles(options.inputPath, VIDEO_EXTENSIONS) : [];
+  let imageFiles: string[] = [];
+  let videoFiles: string[] = [];
+
+  if (options.isMultipleFiles === true && options.inputPaths) {
+    // Handle multiple individual files
+    if (options.mediaType !== 'videos') {
+      imageFiles = await getFilesFromMultiplePaths(options.inputPaths, IMAGE_EXTENSIONS);
+    }
+    if (options.mediaType !== 'images') {
+      videoFiles = await getFilesFromMultiplePaths(options.inputPaths, VIDEO_EXTENSIONS);
+    }
+  } else {
+    // Handle single file or directory
+    if (options.mediaType !== 'videos') {
+      imageFiles = await getMediaFiles(options.inputPath, IMAGE_EXTENSIONS);
+    }
+    if (options.mediaType !== 'images') {
+      videoFiles = await getMediaFiles(options.inputPath, VIDEO_EXTENSIONS);
+    }
+  }
 
   const totalFiles = imageFiles.length + videoFiles.length;
 
@@ -64,12 +84,23 @@ export async function convertMedia(options: ConversionOptions): Promise<Conversi
 
   // Convert images
   for (const imagePath of imageFiles) {
-    const relativePath = path.relative(options.inputPath, imagePath);
-    const outputPath = path.join(
-      options.outputDir,
-      path.dirname(relativePath),
-      path.basename(relativePath, path.extname(relativePath)) + '.webp'
-    );
+    let outputPath: string;
+    
+    if (options.isMultipleFiles === true) {
+      // For multiple files, put them directly in output directory
+      outputPath = path.join(
+        options.outputDir,
+        path.basename(imagePath, path.extname(imagePath)) + '.webp'
+      );
+    } else {
+      // For single path (file or directory), preserve structure
+      const relativePath = path.relative(options.inputPath, imagePath);
+      outputPath = path.join(
+        options.outputDir,
+        path.dirname(relativePath),
+        path.basename(relativePath, path.extname(relativePath)) + '.webp'
+      );
+    }
 
     const success = await convertImageToWebP(
       imagePath,
@@ -89,12 +120,23 @@ export async function convertMedia(options: ConversionOptions): Promise<Conversi
 
   // Convert videos
   for (const videoPath of videoFiles) {
-    const relativePath = path.relative(options.inputPath, videoPath);
-    const outputPath = path.join(
-      options.outputDir,
-      path.dirname(relativePath),
-      path.basename(relativePath, path.extname(relativePath)) + '.webm'
-    );
+    let outputPath: string;
+    
+    if (options.isMultipleFiles === true) {
+      // For multiple files, put them directly in output directory
+      outputPath = path.join(
+        options.outputDir,
+        path.basename(videoPath, path.extname(videoPath)) + '.webm'
+      );
+    } else {
+      // For single path (file or directory), preserve structure
+      const relativePath = path.relative(options.inputPath, videoPath);
+      outputPath = path.join(
+        options.outputDir,
+        path.dirname(relativePath),
+        path.basename(relativePath, path.extname(relativePath)) + '.webm'
+      );
+    }
 
     const success = await convertVideoToWebM(
       videoPath,
@@ -117,10 +159,22 @@ export async function convertMedia(options: ConversionOptions): Promise<Conversi
   return result;
 }
 
+// Get version from package.json
+function getVersion(): string {
+  try {
+    const packagePath = path.join(__dirname, '..', 'package.json');
+    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8'));
+    return packageJson.version;
+  } catch {
+    return 'unknown';
+  }
+}
+
 // Main CLI function
 export async function main(): Promise<void> {
   console.clear();
-  console.log(chalk.bold.blue('👋 Welcome to MERT-Convert!\n'));
+  const version = getVersion();
+  console.log(chalk.bold.blue(`👋 Welcome to MERT-Convert v${version}!\n`));
 
   // Check for video conversion capability
   const videoSupport = await checkFFmpeg();
@@ -156,13 +210,19 @@ export async function main(): Promise<void> {
       type: 'text',
       name: 'inputPath',
       message:
-        'Please enter the path to your folder or file (Tip: You can also drag and drop a folder or file into the terminal and press Enter):',
+        'Please enter the path to your folder or file (Tip: You can also drag and drop files/folders into the terminal and press Enter):',
       validate: async (value: string) => {
         if (!value) return 'Please enter a path';
         try {
-          const cleanPath = validatePath(value);
-          const exists = await fs.pathExists(cleanPath);
-          if (!exists) return 'Path does not exist';
+          const pathInfo = await validateMultiplePaths(value);
+          
+          if (!pathInfo.allExist) {
+            if (pathInfo.isMultipleFiles) {
+              return `Some files not found: ${pathInfo.invalidPaths.join(', ')}`;
+            } else {
+              return 'Path does not exist';
+            }
+          }
           return true;
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : 'Invalid path';
@@ -180,11 +240,18 @@ export async function main(): Promise<void> {
       process.exit(0);
     }
 
-    const cleanInputPath = validatePath(inputPathResponse.inputPath as string);
+    // Parse the input to determine if it's multiple files or single path
+    const pathInfo = await validateMultiplePaths(inputPathResponse.inputPath as string);
+    const cleanInputPath = pathInfo.isMultipleFiles ? '' : pathInfo.validPaths[0];
 
-    // Check if it's a file or directory
-    const stats = await fs.stat(cleanInputPath);
-    const isFile = stats.isFile();
+    // Determine input type for display
+    let inputDisplayType = '';
+    if (pathInfo.isMultipleFiles) {
+      inputDisplayType = `${pathInfo.validPaths.length} files`;
+    } else {
+      const stats = await fs.stat(cleanInputPath);
+      inputDisplayType = stats.isFile() ? '(file)' : '(folder)';
+    }
 
     // Max file size
     const maxSizeResponse = await prompts({
@@ -238,7 +305,14 @@ export async function main(): Promise<void> {
     // Summary and confirmation
     console.log(chalk.cyan('\n--- Conversion Summary ---'));
     console.log(`Media Type: ${chalk.bold(mediaTypeResponse.mediaType as string)}`);
-    console.log(`Input: ${chalk.bold(cleanInputPath)} ${isFile ? '(file)' : '(folder)'}`);
+    
+    if (pathInfo.isMultipleFiles) {
+      console.log(`Input: ${chalk.bold(inputDisplayType)}`);
+      console.log(chalk.gray(`  Files: ${pathInfo.validPaths.map(p => path.basename(p)).join(', ')}`));
+    } else {
+      console.log(`Input: ${chalk.bold(cleanInputPath)} ${inputDisplayType}`);
+    }
+    
     console.log(`Max Size: ${chalk.bold(maxSizeResponse.maxSizeKB + ' KB')}`);
     console.log(`Quality: ${chalk.bold(String(qualityResponse.quality))}`);
     console.log(`Output: ${chalk.bold(outputDirResponse.outputDir as string)}`);
@@ -259,6 +333,8 @@ export async function main(): Promise<void> {
     const options: ConversionOptions = {
       mediaType: mediaTypeResponse.mediaType as 'images' | 'videos' | 'both',
       inputPath: cleanInputPath,
+      inputPaths: pathInfo.isMultipleFiles ? pathInfo.validPaths : undefined,
+      isMultipleFiles: pathInfo.isMultipleFiles,
       maxSizeKB: maxSizeResponse.maxSizeKB as number,
       quality: qualityResponse.quality as number,
       outputDir: outputDirResponse.outputDir as string,
