@@ -12,53 +12,64 @@ export async function convertImageToWebP(
   initialQuality: number,
   onWarning?: (message: string) => void
 ): Promise<boolean> {
-  let quality = initialQuality;
-  let attempts = 0;
-
   await fs.ensureDir(path.dirname(outputPath));
 
-  // First, try with different quality levels
-  while (attempts < 8 && quality > 5) {
-    try {
+  // Optimized approach: fewer attempts, better quality preservation
+  const targetSizeTolerance = targetSizeKB * 1.05; // Allow 5% tolerance to preserve quality
+  let quality = initialQuality;
+
+  try {
+    // Attempt 1: Try with original quality
+    await sharp(inputPath, {
+      limitInputPixels: false,
+      sequentialRead: true
+    })
+    .webp({ 
+      quality,
+      effort: 4, // Balanced effort for speed/quality
+      smartSubsample: true,
+      nearLossless: quality >= 90
+    })
+    .toFile(outputPath);
+
+    let stats = await fs.stat(outputPath);
+    let sizeKB = stats.size / 1024;
+
+    if (sizeKB <= targetSizeTolerance) {
+      return true; // Success with good quality
+    }
+
+    // Attempt 2: Moderate quality reduction if needed
+    if (sizeKB > targetSizeKB) {
+      quality = Math.max(60, quality - 25); // More gentle quality reduction
+      
       await sharp(inputPath, {
         limitInputPixels: false,
         sequentialRead: true
       })
       .webp({ 
         quality,
-        effort: attempts < 3 ? 3 : 6,
-        smartSubsample: true,
-        nearLossless: quality >= 90
+        effort: 5,
+        smartSubsample: true
       })
       .toFile(outputPath);
 
-      const stats = await fs.stat(outputPath);
-      const sizeKB = stats.size / 1024;
+      stats = await fs.stat(outputPath);
+      sizeKB = stats.size / 1024;
 
       if (sizeKB <= targetSizeKB) {
         return true;
       }
-
-      // More aggressive quality reduction
-      quality = Math.max(5, quality - 12);
-      attempts++;
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      console.error(chalk.red(`  ✗ Error converting ${path.basename(inputPath)}: ${errorMessage}`));
-      return false;
     }
-  }
 
-  // If quality reduction failed, try progressive resizing with iterative approach
-  const metadata = await sharp(inputPath).metadata();
-  let scaleFactor = 0.95; // Start with 95% of original size
-  let resizeAttempts = 0;
-  const maxResizeAttempts = 10;
-
-  while (resizeAttempts < maxResizeAttempts && scaleFactor > 0.3) {
-    try {
-      const newWidth = Math.floor((metadata.width || 1920) * scaleFactor);
-      const newHeight = Math.floor((metadata.height || 1080) * scaleFactor);
+    // Attempt 3: Final attempt with smart resizing if still too large
+    if (sizeKB > targetSizeKB) {
+      const metadata = await sharp(inputPath).metadata();
+      
+      // Calculate optimal scale factor based on current vs target size
+      const reductionFactor = Math.sqrt(targetSizeKB / sizeKB * 0.9); // 90% of target for safety
+      const newWidth = Math.max(400, Math.floor((metadata.width || 1920) * reductionFactor));
+      const newHeight = Math.max(300, Math.floor((metadata.height || 1080) * reductionFactor));
       
       await sharp(inputPath, {
         limitInputPixels: false,
@@ -69,66 +80,32 @@ export async function convertImageToWebP(
         withoutEnlargement: true
       })
       .webp({ 
-        quality: 15, // Very low quality but acceptable
-        effort: 6, 
+        quality: Math.max(50, quality), // Maintain reasonable quality
+        effort: 5,
         smartSubsample: true
       })
       .toFile(outputPath);
 
-      const stats = await fs.stat(outputPath);
-      const sizeKB = stats.size / 1024;
+      stats = await fs.stat(outputPath);
+      sizeKB = stats.size / 1024;
 
       if (sizeKB <= targetSizeKB) {
-        return true; // Success! Size target achieved
+        return true;
       }
 
-      // Reduce size more aggressively
-      scaleFactor -= 0.08; // Reduce by 8% each iteration
-      resizeAttempts++;
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      console.error(chalk.red(`  ✗ Error converting ${path.basename(inputPath)}: ${errorMessage}`));
-      return false;
-    }
-  }
-
-  // Final desperate attempt - very small size with minimum quality
-  try {
-    await sharp(inputPath, {
-      limitInputPixels: false,
-      sequentialRead: true
-    })
-    .resize(200, 200, { // Very small fallback size
-      fit: 'inside',
-      withoutEnlargement: true,
-      kernel: sharp.kernel.nearest // Fastest, but lower quality
-    })
-    .webp({ 
-      quality: 5, // Minimum quality
-      effort: 6
-    })
-    .toFile(outputPath);
-
-    const finalStats = await fs.stat(outputPath);
-    const finalSizeKB = finalStats.size / 1024;
-    
-    if (finalSizeKB <= targetSizeKB) {
-      if (onWarning) {
-        onWarning(`Achieved ${targetSizeKB}KB target for ${path.basename(inputPath)} but with significant quality reduction (${Math.round(finalSizeKB)}KB)`);
+      // If still too large, warn but keep the file (better than 2KB quality disaster)
+      if (sizeKB > targetSizeKB && onWarning) {
+        onWarning(`Cannot achieve ${targetSizeKB}KB target for ${path.basename(inputPath)} (final: ${Math.round(sizeKB)}KB) while maintaining reasonable quality`);
       }
-      return true;
     }
 
-    // This should never happen, but if it does, report failure
-    if (onWarning) {
-      onWarning(`FAILED to achieve ${targetSizeKB}KB target for ${path.basename(inputPath)} (final: ${Math.round(finalSizeKB)}KB) - file may be extremely complex`);
-    }
+    return true;
+
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error(chalk.red(`  ✗ Error in final conversion attempt for ${path.basename(inputPath)}: ${errorMessage}`));
+    console.error(chalk.red(`  ✗ Error converting ${path.basename(inputPath)}: ${errorMessage}`));
+    return false;
   }
-
-  return true; // Return true to continue processing other files
 }
 
 // Convert video to WebM with size constraint
