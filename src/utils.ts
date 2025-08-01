@@ -22,14 +22,21 @@ export const VIDEO_EXTENSIONS = [
 
 // Parse multiple file paths from drag & drop input
 export function parseMultipleFiles(input: string): string[] {
-  // Handle escaped spaces in file paths by temporarily replacing them
+  // Handle escaped characters in file paths by temporarily replacing them
   const escapedSpaceMarker = '___ESCAPED_SPACE___';
-  const preprocessed = input.replace(/\\ /g, escapedSpaceMarker);
+  const escapedParenMarker = '___ESCAPED_PAREN___';
   
-  // Split by spaces and restore escaped spaces
+  const preprocessed = input
+    .replace(/\\ /g, escapedSpaceMarker)
+    .replace(/\\([()])/g, escapedParenMarker + '$1');
+  
+  // Split by spaces and restore escaped characters
   const paths = preprocessed
     .split(' ')
-    .map(p => p.replace(new RegExp(escapedSpaceMarker, 'g'), ' '))
+    .map(p => p
+      .replace(new RegExp(escapedSpaceMarker, 'g'), ' ')
+      .replace(new RegExp(escapedParenMarker + '([()])', 'g'), '$1')
+    )
     .filter(p => p.trim().length > 0);
   
   return paths;
