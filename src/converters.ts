@@ -20,7 +20,18 @@ export async function convertImageToWebP(
 
   while (attempts < maxAttempts && quality > 0) {
     try {
-      await sharp(inputPath).webp({ quality }).toFile(outputPath);
+      // Optimized Sharp settings for better performance
+      await sharp(inputPath, {
+        limitInputPixels: false, // Remove pixel limit for large images
+        sequentialRead: true     // Better performance for JPEG inputs
+      })
+      .webp({ 
+        quality,
+        effort: attempts < 2 ? 3 : 6, // Use lower effort for initial attempts, max effort for final attempts
+        smartSubsample: true,          // Better compression efficiency
+        nearLossless: quality >= 90    // Use near-lossless for high quality
+      })
+      .toFile(outputPath);
 
       const stats = await fs.stat(outputPath);
       const sizeKB = stats.size / 1024;
@@ -35,10 +46,13 @@ export async function convertImageToWebP(
 
       // If we can't achieve target size, try more aggressive compression
       if (attempts >= maxAttempts - 1) {
-        // Final attempt with very low quality
-        await sharp(inputPath)
-          .webp({ quality: 10, effort: 6 })
-          .toFile(outputPath);
+        // Final attempt with very low quality and maximum effort
+        await sharp(inputPath, {
+          limitInputPixels: false,
+          sequentialRead: true
+        })
+        .webp({ quality: 10, effort: 6, smartSubsample: true })
+        .toFile(outputPath);
         
         const finalStats = await fs.stat(outputPath);
         const finalSizeKB = finalStats.size / 1024;
@@ -50,10 +64,16 @@ export async function convertImageToWebP(
           const newWidth = Math.floor((metadata.width || 1920) * reduction);
           const newHeight = Math.floor((metadata.height || 1080) * reduction);
           
-          await sharp(inputPath)
-            .resize(newWidth, newHeight)
-            .webp({ quality: 20, effort: 6 })
-            .toFile(outputPath);
+          await sharp(inputPath, {
+            limitInputPixels: false,
+            sequentialRead: true
+          })
+          .resize(newWidth, newHeight, {
+            kernel: sharp.kernel.lanczos3, // High quality resizing
+            withoutEnlargement: true
+          })
+          .webp({ quality: 25, effort: 6, smartSubsample: true })
+          .toFile(outputPath);
             
           // Check final size after resize
           const resizedStats = await fs.stat(outputPath);

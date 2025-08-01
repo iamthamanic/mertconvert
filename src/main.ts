@@ -2,6 +2,7 @@
 
 import path from 'path';
 import { readFileSync } from 'fs';
+import os from 'os';
 import chalk from 'chalk';
 import cliProgress from 'cli-progress';
 import fs from 'fs-extra';
@@ -85,77 +86,28 @@ export async function convertMedia(options: ConversionOptions): Promise<Conversi
   // Collect warnings to show after progress bar
   const warnings: string[] = [];
 
-  // Convert images
-  for (const imagePath of imageFiles) {
-    let outputPath: string;
-    
-    if (options.isMultipleFiles === true) {
-      // For multiple files, put them directly in output directory
-      outputPath = path.join(
-        options.outputDir,
-        path.basename(imagePath, path.extname(imagePath)) + '.webp'
-      );
-    } else {
-      // For single path (file or directory), preserve structure
-      const relativePath = path.relative(options.inputPath, imagePath);
-      outputPath = path.join(
-        options.outputDir,
-        path.dirname(relativePath),
-        path.basename(relativePath, path.extname(relativePath)) + '.webp'
-      );
-    }
-
-    const success = await convertImageToWebP(
-      imagePath,
-      outputPath,
-      options.maxSizeKB,
-      options.quality,
-      (warning: string) => warnings.push(warning)
+  // Convert images with parallel processing
+  if (imageFiles.length > 0) {
+    await processFilesInParallel(
+      imageFiles,
+      options,
+      'image',
+      progressBar,
+      warnings,
+      result
     );
-
-    if (success) {
-      result.converted++;
-    } else {
-      result.failed++;
-    }
-
-    progressBar.increment();
   }
 
-  // Convert videos
-  for (const videoPath of videoFiles) {
-    let outputPath: string;
-    
-    if (options.isMultipleFiles === true) {
-      // For multiple files, put them directly in output directory
-      outputPath = path.join(
-        options.outputDir,
-        path.basename(videoPath, path.extname(videoPath)) + '.webm'
-      );
-    } else {
-      // For single path (file or directory), preserve structure
-      const relativePath = path.relative(options.inputPath, videoPath);
-      outputPath = path.join(
-        options.outputDir,
-        path.dirname(relativePath),
-        path.basename(relativePath, path.extname(relativePath)) + '.webm'
-      );
-    }
-
-    const success = await convertVideoToWebM(
-      videoPath,
-      outputPath,
-      options.maxSizeKB,
-      options.quality
+  // Convert videos with parallel processing
+  if (videoFiles.length > 0) {
+    await processFilesInParallel(
+      videoFiles,
+      options,
+      'video',
+      progressBar,
+      warnings,
+      result
     );
-
-    if (success) {
-      result.converted++;
-    } else {
-      result.failed++;
-    }
-
-    progressBar.increment();
   }
 
   progressBar.stop();
@@ -167,6 +119,92 @@ export async function convertMedia(options: ConversionOptions): Promise<Conversi
   }
 
   return result;
+}
+
+// Process files in parallel with controlled concurrency
+async function processFilesInParallel(
+  files: string[],
+  options: ConversionOptions,
+  type: 'image' | 'video',
+  progressBar: cliProgress.SingleBar,
+  warnings: string[],
+  result: ConversionResult
+): Promise<void> {
+  // Use 75% of available CPU cores for optimal performance
+  const maxConcurrency = Math.max(1, Math.floor(os.cpus().length * 0.75));
+  
+  // Create conversion tasks
+  const tasks = files.map((filePath) => async (): Promise<void> => {
+    let outputPath: string;
+    
+    if (options.isMultipleFiles === true) {
+      // For multiple files, put them directly in output directory
+      const extension = type === 'image' ? '.webp' : '.webm';
+      outputPath = path.join(
+        options.outputDir,
+        path.basename(filePath, path.extname(filePath)) + extension
+      );
+    } else {
+      // For single path (file or directory), preserve structure
+      const relativePath = path.relative(options.inputPath, filePath);
+      const extension = type === 'image' ? '.webp' : '.webm';
+      outputPath = path.join(
+        options.outputDir,
+        path.dirname(relativePath),
+        path.basename(relativePath, path.extname(relativePath)) + extension
+      );
+    }
+
+    let success: boolean;
+    if (type === 'image') {
+      success = await convertImageToWebP(
+        filePath,
+        outputPath,
+        options.maxSizeKB,
+        options.quality,
+        (warning: string) => warnings.push(warning)
+      );
+    } else {
+      success = await convertVideoToWebM(
+        filePath,
+        outputPath,
+        options.maxSizeKB,
+        options.quality
+      );
+    }
+
+    if (success) {
+      result.converted++;
+    } else {
+      result.failed++;
+    }
+
+    progressBar.increment();
+  });
+
+  // Process tasks with controlled concurrency
+  const runningTasks = new Set<Promise<void>>();
+  
+  for (const task of tasks) {
+    // Wait for a free slot if all are occupied
+    if (runningTasks.size >= maxConcurrency) {
+      await Promise.race(runningTasks);
+    }
+    
+    // Start the task
+    const runningTask = task().then(() => {
+      runningTasks.delete(runningTask);
+    }).catch((error: unknown) => {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.error(chalk.red(`Error in parallel processing: ${errorMessage}`));
+      runningTasks.delete(runningTask);
+    });
+    
+    runningTasks.add(runningTask);
+  }
+  
+  // Wait for all remaining tasks to complete
+  await Promise.all(runningTasks);
 }
 
 // Get version from package.json
@@ -184,7 +222,11 @@ function getVersion(): string {
 export async function main(): Promise<void> {
   console.clear();
   const version = getVersion();
+  const cpuCores = os.cpus().length;
+  const usedCores = Math.max(1, Math.floor(cpuCores * 0.75));
+  
   console.log(chalk.bold.blue(`👋 Welcome to MERT-Convert v${version}!\n`));
+  console.log(chalk.gray(`🚀 Performance Mode: Using ${usedCores}/${cpuCores} CPU cores for parallel processing\n`));
 
   // Check for video conversion capability
   const videoSupport = await checkFFmpeg();
